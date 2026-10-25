@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>我为学院代言 - 图文浏览</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    display: flex; height: 100vh; overflow: hidden; background: #f5f6f8;
+  }
+  /* 左侧列表 */
+  #sidebar {
+    width: 340px; min-width: 260px; background: #fff;
+    border-right: 1px solid #e0e3e8; display: flex; flex-direction: column;
+  }
+  #sidebar header {
+    padding: 12px 14px; border-bottom: 1px solid #e0e3e8; background: #fafbfc;
+  }
+  #sidebar header h1 { font-size: 16px; margin-bottom: 8px; color: #1a73e8; }
+  #mode-tip {
+    font-size: 12px; color: #b45309; background: #fef3c7;
+    padding: 8px 14px; display: none; line-height: 1.5;
+  }
+  #zip-list { flex: 1; overflow-y: auto; }
+  .zip-item {
+    position: relative; padding: 10px 44px 10px 14px; cursor: pointer;
+    border-bottom: 1px solid #f0f2f5; font-size: 13px; line-height: 1.45;
+    word-break: break-all;
+  }
+  .zip-item:hover { background: #f0f6ff; }
+  .zip-item.active { background: #e3eefc; border-left: 3px solid #1a73e8; padding-left: 11px; }
+  .zip-item .no { color: #1a73e8; font-weight: bold; }
+  .zip-item .dl {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    width: 28px; height: 28px; display: none; align-items: center; justify-content: center;
+    border: none; background: transparent; text-decoration: none; color: #1a73e8;
+    border-radius: 50%; cursor: pointer;
+  }
+  .zip-item .dl:hover { background: #e3eefc; }
+  .zip-item.active .dl { display: flex; }
+  /* 右侧内容 */
+  #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #main-title {
+    padding: 12px 18px; background: #fff; border-bottom: 1px solid #e0e3e8;
+    font-size: 15px; color: #333; word-break: break-all;
+  }
+  #content { flex: 1; overflow-y: auto; padding: 16px; }
+  /* 竖向双列瀑布流：消除不同高度图片之间的大段空白 */
+  #img-grid {
+    column-count: 2; column-gap: 10px;
+  }
+  #img-grid img {
+    width: 100%; height: auto; display: block; border-radius: 6px;
+    border: 1px solid #ddd; cursor: pointer; background: #fff;
+    margin-bottom: 10px; break-inside: avoid;
+  }
+  .empty { color: #999; font-size: 14px; padding: 30px; text-align: center; }
+  /* 大图预览 */
+  #viewer {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85);
+    z-index: 100; align-items: center; justify-content: center; cursor: zoom-out;
+  }
+  #viewer img { max-width: 96vw; max-height: 96vh; }
+  /* 文件夹选择输入（file:// 降级用），隐藏但可编程触发 */
+  #folderInput { display: none; }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <header>
+    <h1>📦 我为学院代言</h1>
+  </header>
+  <div id="mode-tip">
+    无法自动读取目录（可能是直接双击打开的），点击页面任意位置后选择本页所在的根目录文件夹。
+  </div>
+  <div id="zip-list"><div class="empty">加载中…</div></div>
+</aside>
+
+<main id="main">
+  <div id="main-title">左侧点击压缩包名称查看内容</div>
+  <div id="content"><div class="empty">尚未选择</div></div>
+</main>
+
+<div id="viewer"><img id="viewerImg" src="" alt=""></div>
+<input type="file" id="folderInput" webkitdirectory multiple>
+
+<script>
+(function () {
+  "use strict";
+
+  var IMG_EXT = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "avif"];
+  var DOC_EXT = ["doc", "docx", "rtf", "txt", "pdf", "wps"];
+  // 压缩包命名：我为学院代言{9位数字学号}{专业和姓名}{电话}图文（可能含空格，格式可能不规范）
+  var ZIP_RE = /^我为学院代言\s*(\d{9})\s*(.+?)\s*(1\d{10})\s*图文\s*/;
+
+  var zipListEl = document.getElementById("zip-list");
+  var titleEl   = document.getElementById("main-title");
+  var contentEl = document.getElementById("content");
+  var viewer    = document.getElementById("viewer");
+  var viewerImg = document.getElementById("viewerImg");
+  var tipEl     = document.getElementById("mode-tip");
+  var folderInput = document.getElementById("folderInput");
+
+  var entries = [];   // { zip, folder, xh, name, tel, itemEl }
+  var activeIdx = -1;
+  // 本页面自己的文件名（目录列表中要排除；页面不能用 index.html 命名，
+  // 否则 python http.server 会把本页当作所有目录的列表返回，导致识别不到压缩包）
+  var SELF_NAME = decodeURIComponent((location.pathname.split("/").pop() || ""));
+
+  /* ---------- 工具 ---------- */
+  function ext(name) {
+    var i = name.lastIndexOf(".");
+    return i < 0 ? "" : name.slice(i + 1).toLowerCase();
+  }
+  function isImg(n) { return IMG_EXT.indexOf(ext(n)) >= 0; }
+  function isDoc(n) { return DOC_EXT.indexOf(ext(n)) >= 0; }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
+  function encodePath(p) {
+    return p.split("/").map(encodeURIComponent).join("/");
+  }
+
+  /* ---------- 模式一：HTTP 目录列表 ---------- */
+  // 返回 [{name(解码后显示名), href(服务器给的原始相对路径), dir}]
+  function fetchListing(dirPath) {
+    return fetch(dirPath, { headers: { "Accept": "text/html" } })
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.status);
+        return r.text();
+      })
+      .then(function (html) {
+        var doc = new DOMParser().parseFromString(html, "text/html");
+        var out = [];
+        doc.querySelectorAll("a[href]").forEach(function (a) {
+          var href = a.getAttribute("href");
+          if (!href || href.charAt(0) === "?" || href.charAt(0) === "#" ||
+              /^[a-z]+:\/\//i.test(href) || href.indexOf("..") >= 0) return;
+          var name;
+          try { name = decodeURIComponent(href); } catch (e) { name = href; }
+          name = name.replace(/\/+$/, "");
+          if (!name || name === SELF_NAME) return;
+          out.push({ name: name, href: href, dir: /\/$/.test(href) });
+        });
+        return out;
+      });
+  }
+
+  function loadHttpMode() {
+    return fetchListing("./").then(function (root) {
+      return root
+        .filter(function (e) { return !e.dir && /\.(zip|rar|7z|tar|gz|tgz)$/i.test(e.name); })
+        .map(function (e) { return { zip: e.name, zipHref: e.href }; })
+        .sort(function (a, b) { return a.zip.localeCompare(b.zip, "zh"); })
+        .map(function (it) {
+          // 严格同名：文件夹名 = 压缩包名去掉扩展名
+          var stem = it.zip.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "");
+          return { zip: it.zip, zipHref: it.zipHref, folder: stem + "/" };
+        });
+    });
+  }
+
+  /* ---------- 模式二：file:// 选择文件夹 ---------- */
+  // 构建嵌套目录树：{ dirs: {名字: 节点}, files: [File...] }
+  function loadFolderMode(files) {
+    var root = { dirs: {}, files: [] };
+    var zipMap = {};
+    Array.prototype.forEach.call(files, function (f) {
+      var rel = f.webkitRelativePath || f.name; // "root/.../file"
+      var parts = rel.split("/");
+      parts.shift(); // 去掉根目录名
+      var fname = parts.pop();
+      var node = root;
+      for (var i = 0; i < parts.length; i++) {
+        if (!node.dirs[parts[i]]) node.dirs[parts[i]] = { dirs: {}, files: [] };
+        node = node.dirs[parts[i]];
+      }
+      node.files.push(f); // 保存 File 对象，供 createObjectURL 使用
+      if (parts.length === 0 && /\.(zip|rar|7z|tar|gz|tgz)$/i.test(fname)) {
+        zipMap[fname] = true;
+      }
+    });
+    var zips = Object.keys(zipMap).sort(function (a, b) { return a.localeCompare(b, "zh"); });
+    return zips.map(function (z) {
+      // 严格同名：文件夹名 = 压缩包名去掉扩展名
+      return { zip: z, zipHref: null,
+               folderNode: root.dirs[z.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "")] || null };
+    });
+  }
+
+  /* ---------- 渲染左侧列表 ---------- */
+  function buildList(data) {
+    entries = [];
+    zipListEl.innerHTML = "";
+    if (!data.length) {
+      zipListEl.innerHTML = '<div class="empty">未找到压缩包文件</div>';
+      return;
+    }
+    data.forEach(function (d) {
+      var m = ZIP_RE.exec(d.zip);
+      var item = document.createElement("div");
+      item.className = "zip-item";
+      if (m) {
+        item.innerHTML =
+          "我为学院代言<span class='no'>" + esc(m[1]) + "</span>" +
+          esc(m[2]) + esc(m[3]) + "图文";
+      } else {
+        item.textContent = d.zip;
+      }
+      // 下载图标（线条型：下箭头 + 底部一横），仅在选中项尾部显示
+      var dl = document.createElement("a");
+      dl.className = "dl"; dl.title = "下载压缩包";
+      if (d.zipHref) { dl.href = d.zipHref; } else { dl.style.display = "none"; }
+      dl.setAttribute("download", "");
+      dl.innerHTML =
+        "<svg width='18' height='18' viewBox='0 0 24 24' fill='none' " +
+        "stroke='currentColor' stroke-width='2' stroke-linecap='round' " +
+        "stroke-linejoin='round'>" +
+        "<path d='M12 4v12'/><path d='M6 10l6 6 6-6'/><path d='M4 20h16'/></svg>";
+      item.appendChild(dl);
+      zipListEl.appendChild(item);
+      entries.push({
+        zip: d.zip, zipHref: d.zipHref,
+        folder: d.folder || null, folderNode: d.folderNode || null,
+        xh: m ? m[1] : "", name: m ? m[2] : "", tel: m ? m[3] : "",
+        itemEl: item
+      });
+    });
+  }
+
+  /* ---------- 递归收集：无论隔多少层、多少个文件夹，全部探到底 ---------- */
+  // http 模式：absUrl 为目录的绝对 URL；seen 记录已访问目录防止死循环
+  function walkHttp(absUrl, out, seen, depth) {
+    if (seen[absUrl] || depth > 10) return Promise.resolve();
+    seen[absUrl] = true;
+    return fetchListing(absUrl).then(function (list) {
+      var sub = [];
+      list.forEach(function (e) {
+        // 子项 href 相对「当前列表所在 URL」解析
+        var abs = new URL(e.href, absUrl).href;
+        if (e.dir) sub.push(abs);
+        else if (isImg(e.name)) out.images.push({ name: e.name, url: abs });
+        else if (isDoc(e.name)) out.docs.push({ name: e.name, url: abs });
+        else out.others.push({ name: e.name });
+      });
+      // 逐个子文件夹递归，串行避免请求过多
+      var p = Promise.resolve();
+      sub.forEach(function (s) {
+        p = p.then(function () { return walkHttp(s, out, seen, depth + 1); });
+      });
+      return p;
+    });
+  }
+
+  // folder 模式：递归节点树（node.files 存 File 对象）
+  function walkNode(node, out) {
+    node.files.forEach(function (f) {
+      var n = f.name || f;
+      if (isImg(n)) out.images.push({ name: n, file: f });
+      else if (isDoc(n)) out.docs.push({ name: n, file: f });
+      else out.others.push({ name: n });
+    });
+    Object.keys(node.dirs).forEach(function (k) { walkNode(node.dirs[k], out); });
+  }
+
+  function collect(en) {
+    var out = { images: [], docs: [], others: [] };
+    if (en.folderNode) {          // file:// 模式
+      walkNode(en.folderNode, out);
+      // 为图片/文档生成 blob URL
+      out.images.forEach(function (im) {
+        im.url = im.file ? URL.createObjectURL(im.file) : "";
+      });
+      out.docs.forEach(function (dc) {
+        dc.url = dc.file ? URL.createObjectURL(dc.file) : "";
+      });
+      return Promise.resolve(out);
+    }
+    if (en.folder) {              // http 模式
+      return walkHttp(new URL(en.folder, location.href).href, out, {}, 0)
+        .then(function () { return out; });
+    }
+    return Promise.reject(new Error("no folder"));
+  }
+
+  function showEntry(idx) {
+    if (activeIdx >= 0) entries[activeIdx].itemEl.classList.remove("active");
+    activeIdx = idx;
+    var en = entries[idx];
+    en.itemEl.classList.add("active");
+    titleEl.textContent = en.zip;
+
+    contentEl.innerHTML = '<div class="empty">加载中…</div>';
+    collect(en).then(function (r) {
+      var html = "";
+      // 文档列表
+      if (r.docs.length || r.others.length) {
+        html += "<div style='margin-bottom:12px'>";
+        r.docs.forEach(function (d) {
+          html += "<div>📄 <a href='" + d.url + "' target='_blank' style='color:#1a73e8'>" +
+                  esc(d.name) + "</a></div>";
+        });
+        r.others.forEach(function (d) {
+          html += "<div style='color:#888'>📎 " + esc(d.name) + "</div>";
+        });
+        html += "</div>";
+      }
+      // 竖向双列瀑布流缩略图
+      if (r.images.length) {
+        html += "<div id='img-grid'>";
+        r.images.sort(function (a, b) { return a.name.localeCompare(b.name, "zh", { numeric: true }); });
+        r.images.forEach(function (im) {
+          // 不用 loading=lazy：Chromium 会在布局滚动中取消尚未完成的懒加载请求，
+          // 大图传输时间长极易被取消（服务器端表现为 ConnectionResetError 10054）
+          html += "<img src='" + im.url + "' data-full='" + im.url +
+                  "' alt='" + esc(im.name) + "' title='" + esc(im.name) + "'>";
+        });
+        html += "</div>";
+      }
+      if (!html) html = '<div class="empty">该文件夹内没有图片或文档</div>';
+      contentEl.innerHTML = html;
+      // 缩略图点击看大图
+      contentEl.querySelectorAll("img[data-full]").forEach(function (img) {
+        // 碎图（加载失败）：保留默认碎图样式，点击时直接下载原图
+        img.addEventListener("error", function onerr() {
+          img.removeEventListener("error", onerr);
+          var url = img.getAttribute("src");
+          img.title = "图片加载失败，点击下载原图";
+          img.onclick = function () {
+            var a = document.createElement("a");
+            a.href = url; a.setAttribute("download", "");
+            document.body.appendChild(a); a.click(); a.remove();
+          };
+        });
+        img.onclick = function () {
+          viewerImg.src = this.getAttribute("data-full");
+          viewer.style.display = "flex";
+        };
+      });
+    }).catch(function () {
+      contentEl.innerHTML = '<div class="empty">读取文件夹失败</div>';
+    });
+  }
+
+  zipListEl.addEventListener("click", function (ev) {
+    if (ev.target.closest("a")) return; // 点击下载图标时不展开
+    var item = ev.target.closest(".zip-item");
+    if (!item) return;
+    var idx = entries.indexOf(entries.filter(function (e) { return e.itemEl === item; })[0]);
+    if (idx >= 0) showEntry(idx);
+  });
+
+  viewer.onclick = function () {
+    viewer.style.display = "none";
+    viewerImg.src = "";
+  };
+
+  /* ---------- 启动 ---------- */
+  var mode = "http";
+  var folderData = null;
+
+  function startHttp() {
+    loadHttpMode().then(function (data) {
+      buildList(data);
+      if (data.length) showEntry(0);
+    }).catch(function () {
+      // 无法自动读取目录（file:// 等）：点击页面任意位置即弹出文件夹选择
+      mode = "folder";
+      tipEl.style.display = "block";
+      zipListEl.innerHTML = '<div class="empty">请选择根目录文件夹</div>';
+      document.addEventListener("click", function once() {
+        document.removeEventListener("click", once);
+        if (mode === "folder") folderInput.click();
+      });
+    });
+  }
+
+  folderInput.addEventListener("change", function () {
+    var data = loadFolderMode(folderInput.files);
+    buildList(data);
+    tipEl.style.display = "none";
+    if (data.length) showEntry(0);
+  });
+
+  startHttp();
+})();
+</script>
+</body>
+</html>
