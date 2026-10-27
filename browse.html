@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#1a73e8">
 <title>我为学院代言 - 图文浏览</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -66,6 +67,43 @@
   #viewer img { max-width: 96vw; max-height: 96vh; }
   /* 文件夹选择输入（file:// 降级用），隐藏但可编程触发 */
   #folderInput { display: none; }
+
+  /* ===== 手机端适配 ===== */
+  #side-toggle {
+    display: none; border: none; background: transparent; color: #1a73e8;
+    font-size: 22px; line-height: 1; padding: 6px 10px; margin-right: 6px;
+    cursor: pointer; border-radius: 8px; -webkit-tap-highlight-color: transparent;
+  }
+  #side-toggle:active { background: #e3eefc; }
+  @media (max-width: 768px) {
+    body { flex-direction: column; height: 100dvh; }
+    #side-toggle { display: inline-block; }
+    #sidebar {
+      width: 100%; min-width: 0; border-right: none;
+      border-bottom: 1px solid #e0e3e8;
+      max-height: 46dvh; flex: 0 0 auto;
+      transition: max-height .25s ease;
+    }
+    /* 折叠时：列表收起，仅保留头部栏 */
+    #sidebar.collapsed { max-height: 0; overflow: hidden; }
+    #sidebar.collapsed header { display: none; }
+    #sidebar.collapsed #mode-tip { display: none !important; }
+    #main-title { display: flex; align-items: center; padding: 8px 10px; font-size: 14px; }
+    #main-title span.title-text { flex: 1; word-break: break-all; }
+    #content { padding: 10px; }
+    #img-grid { column-count: 1; }
+    #img-grid img { margin-bottom: 8px; border-radius: 8px; }
+    .zip-item { padding: 13px 44px 13px 14px; font-size: 14px; }
+    .zip-item .dl { width: 40px; height: 40px; right: 6px; }
+    .empty { padding: 24px 14px; }
+    #viewer { -webkit-tap-highlight-color: transparent; }
+    #viewer img { max-width: 100vw; max-height: 100dvh; }
+    a, .zip-item { -webkit-tap-highlight-color: rgba(26,115,232,.15); }
+  }
+  /* 超窄屏也保持可用的头部栏 */
+  @media (max-width: 360px) {
+    #sidebar header h1 { font-size: 14px; }
+  }
 </style>
 </head>
 <body>
@@ -81,7 +119,7 @@
 </aside>
 
 <main id="main">
-  <div id="main-title">左侧点击压缩包名称查看内容</div>
+  <div id="main-title"><button id="side-toggle" aria-label="打开/收起列表">☰</button><span class="title-text">左侧点击压缩包名称查看内容</span></div>
   <div id="content"><div class="empty">尚未选择</div></div>
 </main>
 
@@ -361,7 +399,7 @@
     activeIdx = idx;
     var en = entries[idx];
     en.itemEl.classList.add("active");
-    titleEl.textContent = en.name;
+    titleTextEl.textContent = en.name;
 
     if (!en.folder && !en.folderNode && !en.tree) {
       contentEl.innerHTML = '<div class="empty">未找到同名文件夹，无法展示内容</div>';
@@ -418,6 +456,30 @@
       contentEl.innerHTML = '<div class="empty">读取文件夹失败</div>';
     });
   }
+
+  /* ---------- 手机端：侧栏折叠切换 ---------- */
+  var sidebarEl = document.getElementById("sidebar");
+  var toggleBtn = document.getElementById("side-toggle");
+  var titleTextEl = document.querySelector("#main-title .title-text");
+  toggleBtn.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    sidebarEl.classList.toggle("collapsed");
+    toggleBtn.textContent = sidebarEl.classList.contains("collapsed") ? "☰" : "✕";
+  });
+  function isMobile() {
+    return window.matchMedia("(max-width: 768px)").matches;
+  }
+  // 在窄屏上点击列表项后自动收起侧栏，把空间留给内容
+  zipListEl.addEventListener("click", function () {
+    if (isMobile() && activeIdx >= 0) {
+      sidebarEl.classList.add("collapsed");
+      toggleBtn.textContent = "☰";
+    }
+  }, true); // 捕获阶段，确保在任何 showEntry 逻辑后也能执行收起
+  // 窄屏下视口变化（旋转等）时，若转回宽屏则移除折叠状态
+  window.addEventListener("resize", function () {
+    if (!isMobile()) sidebarEl.classList.remove("collapsed");
+  });
 
   zipListEl.addEventListener("click", function (ev) {
     if (ev.target.closest("a")) return; // 点击下载图标时不展开
