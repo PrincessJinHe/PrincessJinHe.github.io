@@ -40,6 +40,7 @@
   }
   .zip-item .dl:hover { background: #e3eefc; }
   .zip-item.active .dl { display: flex; }
+  .zip-item .dl.disabled { color: #c4c9d0; pointer-events: none; }
   /* 右侧内容 */
   #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
   #main-title {
@@ -126,6 +127,41 @@
     return p.split("/").map(encodeURIComponent).join("/");
   }
 
+  /* ---------- 模式〇：清单模式（GitHub Pages 等静态托管） ---------- */
+  // 读取 make_manifest.py 生成的 filelist.json：{dirs:{名字:子树}, files:[名]}
+  function loadManifestMode(tree) {
+    var zipStems = {};
+    var out = [];
+    tree.files.forEach(function (f) {
+      if (/\.(zip|rar|7z|tar|gz|tgz)$/i.test(f)) {
+        var stem = f.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "");
+        zipStems[stem] = true;
+        out.push({ name: f, zipHref: f,
+                   tree: tree.dirs[stem] ? { node: tree.dirs[stem], path: stem + "/" } : null });
+      }
+    });
+    Object.keys(tree.dirs).forEach(function (d) {
+      if (!(d in zipStems)) {
+        out.push({ name: d, zipHref: null,
+                   tree: { node: tree.dirs[d], path: d + "/" } });
+      }
+    });
+    out.sort(function (a, b) { return a.name.localeCompare(b.name, "zh"); });
+    return out;
+  }
+
+  // 递归收集清单树中的图片/文档，path 为相对根目录路径前缀
+  function walkTree(tree, path, out) {
+    tree.files.forEach(function (f) {
+      if (isImg(f)) out.images.push({ name: f, url: encodePath(path + f) });
+      else if (isDoc(f)) out.docs.push({ name: f, url: encodePath(path + f) });
+      else out.others.push({ name: f });
+    });
+    Object.keys(tree.dirs).forEach(function (k) {
+      walkTree(tree.dirs[k], path + k + "/", out);
+    });
+  }
+
   /* ---------- 模式一：HTTP 目录列表 ---------- */
   // 返回 [{name(解码后显示名), href(服务器给的原始相对路径), dir}]
   function fetchListing(dirPath) {
@@ -153,15 +189,27 @@
 
   function loadHttpMode() {
     return fetchListing("./").then(function (root) {
-      return root
-        .filter(function (e) { return !e.dir && /\.(zip|rar|7z|tar|gz|tgz)$/i.test(e.name); })
-        .map(function (e) { return { zip: e.name, zipHref: e.href }; })
-        .sort(function (a, b) { return a.zip.localeCompare(b.zip, "zh"); })
-        .map(function (it) {
-          // 严格同名：文件夹名 = 压缩包名去掉扩展名
-          var stem = it.zip.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "");
-          return { zip: it.zip, zipHref: it.zipHref, folder: stem + "/" };
-        });
+      var dirs = {}, zips = [];
+      root.forEach(function (e) {
+        if (e.dir) dirs[e.name] = true;
+        else if (/\.(zip|rar|7z|tar|gz|tgz)$/i.test(e.name)) zips.push(e);
+      });
+      // 有压缩包的：以压缩包为条目；严格同名文件夹可能存在也可能不存在
+      var out = zips.map(function (z) {
+        var stem = z.name.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "");
+        return { name: z.name, zipHref: z.href,
+                 folder: dirs[stem] ? stem + "/" : null };
+      });
+      // 没有压缩包、只有同名文件夹的：也列出，但下载按钮禁用
+      zips.forEach(function (z) {
+        var stem = z.name.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "");
+        delete dirs[stem];
+      });
+      Object.keys(dirs).forEach(function (d) {
+        out.push({ name: d, zipHref: null, folder: d + "/" });
+      });
+      out.sort(function (a, b) { return a.name.localeCompare(b.name, "zh"); });
+      return out;
     });
   }
 
@@ -185,12 +233,24 @@
         zipMap[fname] = true;
       }
     });
-    var zips = Object.keys(zipMap).sort(function (a, b) { return a.localeCompare(b, "zh"); });
-    return zips.map(function (z) {
-      // 严格同名：文件夹名 = 压缩包名去掉扩展名
-      return { zip: z, zipHref: null,
-               folderNode: root.dirs[z.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "")] || null };
+    // 有压缩包的条目（同名文件夹可能不存在）+ 只有文件夹没有压缩包的条目
+    var zipStems = {};
+    Object.keys(zipMap).forEach(function (z) {
+      zipStems[z.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "")] = true;
     });
+    var out = Object.keys(zipMap).map(function (z) {
+      var stem = z.replace(/\.(zip|rar|7z|tar|gz|tgz)$/i, "");
+      return { name: z, zipHref: null, folderNode: root.dirs[stem] || null,
+               hasZip: true };
+    });
+    Object.keys(root.dirs).forEach(function (d) {
+      if (!(d in zipStems)) {
+        out.push({ name: d, zipHref: null, folderNode: root.dirs[d],
+                   hasZip: false });
+      }
+    });
+    out.sort(function (a, b) { return a.name.localeCompare(b.name, "zh"); });
+    return out;
   }
 
   /* ---------- 渲染左侧列表 ---------- */
@@ -202,7 +262,7 @@
       return;
     }
     data.forEach(function (d) {
-      var m = ZIP_RE.exec(d.zip);
+      var m = ZIP_RE.exec(d.name);
       var item = document.createElement("div");
       item.className = "zip-item";
       if (m) {
@@ -210,12 +270,14 @@
           "我为学院代言<span class='no'>" + esc(m[1]) + "</span>" +
           esc(m[2]) + esc(m[3]) + "图文";
       } else {
-        item.textContent = d.zip;
+        item.textContent = d.name;
       }
-      // 下载图标（线条型：下箭头 + 底部一横），仅在选中项尾部显示
+      // 下载图标（线条型：下箭头 + 底部一横），仅选中项尾部显示；
+      // 根目录不存在对应压缩包时禁用（灰色、不可点击）
       var dl = document.createElement("a");
-      dl.className = "dl"; dl.title = "下载压缩包";
-      if (d.zipHref) { dl.href = d.zipHref; } else { dl.style.display = "none"; }
+      dl.className = "dl" + (d.zipHref ? "" : " disabled");
+      dl.title = d.zipHref ? "下载压缩包" : "根目录不存在对应压缩包，无法下载";
+      if (d.zipHref) { dl.href = d.zipHref; }
       dl.setAttribute("download", "");
       dl.innerHTML =
         "<svg width='18' height='18' viewBox='0 0 24 24' fill='none' " +
@@ -225,9 +287,10 @@
       item.appendChild(dl);
       zipListEl.appendChild(item);
       entries.push({
-        zip: d.zip, zipHref: d.zipHref,
+        name: d.name, zipHref: d.zipHref,
         folder: d.folder || null, folderNode: d.folderNode || null,
-        xh: m ? m[1] : "", name: m ? m[2] : "", tel: m ? m[3] : "",
+        tree: d.tree || null,
+        xh: m ? m[1] : "", uname: m ? m[2] : "", tel: m ? m[3] : "",
         itemEl: item
       });
     });
@@ -281,6 +344,11 @@
       });
       return Promise.resolve(out);
     }
+    if (en.tree) {                // 清单模式（GitHub Pages 等）
+      var o = { images: [], docs: [], others: [] };
+      walkTree(en.tree.node, en.tree.path, o);
+      return Promise.resolve(o);
+    }
     if (en.folder) {              // http 模式
       return walkHttp(new URL(en.folder, location.href).href, out, {}, 0)
         .then(function () { return out; });
@@ -293,8 +361,12 @@
     activeIdx = idx;
     var en = entries[idx];
     en.itemEl.classList.add("active");
-    titleEl.textContent = en.zip;
+    titleEl.textContent = en.name;
 
+    if (!en.folder && !en.folderNode && !en.tree) {
+      contentEl.innerHTML = '<div class="empty">未找到同名文件夹，无法展示内容</div>';
+      return;
+    }
     contentEl.innerHTML = '<div class="empty">加载中…</div>';
     collect(en).then(function (r) {
       var html = "";
@@ -365,17 +437,28 @@
   var folderData = null;
 
   function startHttp() {
-    loadHttpMode().then(function (data) {
+    // 优先读清单文件（GitHub Pages 等静态托管）；失败则尝试目录列表（本地服务器）
+    fetch("filelist.json").then(function (r) {
+      if (!r.ok) throw 0;
+      return r.json();
+    }).then(function (tree) {
+      mode = "manifest";
+      var data = loadManifestMode(tree);
       buildList(data);
       if (data.length) showEntry(0);
     }).catch(function () {
-      // 无法自动读取目录（file:// 等）：点击页面任意位置即弹出文件夹选择
-      mode = "folder";
-      tipEl.style.display = "block";
-      zipListEl.innerHTML = '<div class="empty">请选择根目录文件夹</div>';
-      document.addEventListener("click", function once() {
-        document.removeEventListener("click", once);
-        if (mode === "folder") folderInput.click();
+      loadHttpMode().then(function (data) {
+        buildList(data);
+        if (data.length) showEntry(0);
+      }).catch(function () {
+        // 无法自动读取目录（file:// 等）：点击页面任意位置即弹出文件夹选择
+        mode = "folder";
+        tipEl.style.display = "block";
+        zipListEl.innerHTML = '<div class="empty">请选择根目录文件夹</div>';
+        document.addEventListener("click", function once() {
+          document.removeEventListener("click", once);
+          if (mode === "folder") folderInput.click();
+        });
       });
     });
   }
